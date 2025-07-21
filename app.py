@@ -53,8 +53,8 @@ init_db()
 def get_all_users():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute('SELECT username, password, email, room_code, desk, status, role, work_hours, break_hours FROM users')
-    users = [dict(zip(['username', 'password', 'email', 'room_code', 'desk', 'status', 'role', 'work_hours', 'break_hours'], row)) for row in c.fetchall()]
+    c.execute('SELECT username, password, email, room_code, desk, avatar, status, role, work_hours, break_hours FROM users')
+    users = [dict(zip(['username', 'password', 'email', 'room_code', 'desk', 'avatar', 'status', 'role', 'work_hours', 'break_hours'], row)) for row in c.fetchall()]
     conn.close()
     return users
 
@@ -71,8 +71,8 @@ def find_user_by_username(username):
 def add_user(user):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute('''INSERT INTO users (username, password, email, room_code, desk, status, role, work_hours, break_hours) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-              (user['username'], user['password'], user['email'], user['room_code'], user.get('desk'), user.get('status', 'none'), user.get('role', 'user'), user.get('work_hours', 0), user.get('break_hours', 0)))
+    c.execute('''INSERT INTO users (username, password, email, room_code, desk, avatar, status, role, work_hours, break_hours) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+              (user['username'], user['password'], user['email'], user['room_code'], user.get('desk'), user.get('avatar'), user.get('status', 'none'), user.get('role', 'user'), user.get('work_hours', 0), user.get('break_hours', 0)))
     conn.commit()
     conn.close()
 
@@ -185,6 +185,7 @@ def signup():
         "email": data["email"],
         "room_code": data["room_code"],
         "desk": data.get("deskSelection") if data.get("deskSelection") else None,
+        "avatar": data.get("avatar"),  # <-- Add this line!
         "status": "none",
         "role": role,
         "work_hours": 0,
@@ -258,6 +259,7 @@ def get_status():
             {
                 "username": u["username"],
                 "desk": u.get("desk"),
+                "avatar": u.get("avatar"),
                 "status": u.get("status", "none"),
             }
             for u in users
