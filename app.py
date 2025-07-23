@@ -39,11 +39,27 @@ def init_db():
             break_hours REAL DEFAULT 0
         )
     ''')
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            sender TEXT NOT NULL,
+            receiver TEXT NOT NULL,
+            subject TEXT,
+            message TEXT NOT NULL,
+            timestamp TEXT NOT NULL,
+            is_read INTEGER DEFAULT 0
+        )
+    ''')
     # Add avatar column if it doesn't exist (for migration)
     try:
         c.execute('ALTER TABLE users ADD COLUMN avatar TEXT')
     except sqlite3.OperationalError:
         pass  # Column already exists
+    # Add deleted column to messages if it doesn't exist
+    try:
+        c.execute('ALTER TABLE messages ADD COLUMN deleted INTEGER DEFAULT 0')
+    except sqlite3.OperationalError:
+        pass  # Already exists
     conn.commit()
     conn.close()
 
@@ -189,7 +205,8 @@ def signup():
         "status": "none",
         "role": role,
         "work_hours": 0,
-        "break_hours": 0
+        "break_hours": 0,
+        "inbox": []
     })
     
     return jsonify({"message": "User registered"}), 201
@@ -207,7 +224,7 @@ def login():
     if user and user["password"] == data["password"]:
         user.pop('password', None)  # Don't send password to frontend
         return jsonify({"message": "Login successful", "user": user}), 200
-    return jsonify({"error": "Invalid credentials or group code"}), 401
+    return jsonify({"error": "Unable to login"}), 401
 
 @app.route("/status/<username>/<action>", methods=["POST"])
 def update_status(username, action):
@@ -320,6 +337,72 @@ def get_user(username):
     except Exception as e:
         return jsonify({'error': f'Server error: {str(e)}'}), 500
 
+@app.route('/inbox', methods=['POST'])
+def send_message():
+    data = request.json
+    required = ['sender', 'receiver', 'message']
+    if not all(k in data for k in required):
+        return jsonify({'error': 'Missing fields'}), 400
+    subject = data.get('subject', '')
+    timestamp = datetime.now().isoformat()
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('INSERT INTO messages (sender, receiver, subject, message, timestamp) VALUES (?, ?, ?, ?, ?)',
+              (data['sender'], data['receiver'], subject, data['message'], timestamp))
+    conn.commit()
+    conn.close()
+    return jsonify({'message': 'Message sent!'}), 201
+
+@app.route('/inbox', methods=['GET'])
+def get_inbox():
+    username = request.args.get('username')
+    if not username:
+        return jsonify({'error': 'Username required'}), 400
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('SELECT id, sender, subject, message, timestamp FROM messages WHERE receiver = ? AND (deleted IS NULL OR deleted = 0) ORDER BY timestamp DESC', (username,))
+    messages = [
+        {'id': row[0], 'sender': row[1], 'subject': row[2], 'message': row[3], 'timestamp': row[4]}
+        for row in c.fetchall()
+    ]
+    conn.close()
+    return jsonify({'message': messages})
+
+@app.route('/message/<int:message_id>', methods=['GET'])
+def view_message(message_id):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('SELECT id, sender, receiver, subject, message, timestamp, is_read FROM messages WHERE id = ?', (message_id,))
+    row = c.fetchone()
+    if row:
+        # Optionally mark as read
+        c.execute('UPDATE messages SET is_read = 1 WHERE id = ?', (message_id,))
+        conn.commit()
+        message = dict(zip(['id', 'sender', 'receiver', 'subject', 'message', 'timestamp', 'is_read'], row))
+        conn.close()
+        return jsonify({'message': message}), 200
+    else:
+        conn.close()
+        return jsonify({'error': 'Message not found'}), 404
+
+@app.route('/message/<int:message_id>', methods=['DELETE'])
+def delete_message(message_id):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('UPDATE messages SET deleted = 1 WHERE id = ?', (message_id,))
+    conn.commit()
+    conn.close()
+    return jsonify({'message': 'Message deleted'}), 200
+
+@app.route('/message/<int:message_id>/undo', methods=['POST'])
+def undo_delete_message(message_id):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('UPDATE messages SET deleted = 0 WHERE id = ?', (message_id,))
+    conn.commit()
+    conn.close()
+    return jsonify({'message': 'Message restored'}), 200
+
 @app.route('/timesheets/week', methods=['GET'])
 def get_week_timesheets():
     # Calculate current week's Monday and Friday
@@ -354,6 +437,7 @@ def get_week_timesheets():
 
 def get_week_dates():
     today = date.today()
+    # Monday is 0, Sunday is 6
     start = today - timedelta(days=today.weekday())  # Monday
     return [(start + timedelta(days=i)).isoformat() for i in range(5)]  # Mon-Fri
 
