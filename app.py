@@ -39,11 +39,27 @@ def init_db():
             break_hours REAL DEFAULT 0
         )
     ''')
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            sender TEXT NOT NULL,
+            receiver TEXT NOT NULL,
+            subject TEXT,
+            message TEXT NOT NULL,
+            timestamp TEXT NOT NULL,
+            is_read INTEGER DEFAULT 0
+        )
+    ''')
     # Add avatar column if it doesn't exist (for migration)
     try:
         c.execute('ALTER TABLE users ADD COLUMN avatar TEXT')
     except sqlite3.OperationalError:
         pass  # Column already exists
+    # Add deleted column to messages if it doesn't exist
+    try:
+        c.execute('ALTER TABLE messages ADD COLUMN deleted INTEGER DEFAULT 0')
+    except sqlite3.OperationalError:
+        pass  # Already exists
     conn.commit()
     conn.close()
 
@@ -61,11 +77,11 @@ def get_all_users():
 def find_user_by_username(username):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute('SELECT username, password, email, room_code, desk, avatar, status, role, work_hours, break_hours FROM users WHERE username = ?', (username,))
+    c.execute('SELECT username, password, email, room_code, desk, status, role, work_hours, break_hours FROM users WHERE username = ?', (username,))
     row = c.fetchone()
     conn.close()
     if row:
-        return dict(zip(['username', 'password', 'email', 'room_code', 'desk', 'avatar', 'status', 'role', 'work_hours', 'break_hours'], row))
+        return dict(zip(['username', 'password', 'email', 'room_code', 'desk', 'status', 'role', 'work_hours', 'break_hours'], row))
     return None
 
 def add_user(user):
@@ -80,75 +96,117 @@ def update_user_status(username, action):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     now = datetime.now().isoformat()
+    
     # Fetch current user info
     c.execute('SELECT status, last_clock_in, last_break_start, work_hours, break_hours FROM users WHERE username = ?', (username,))
     row = c.fetchone()
     if not row:
         conn.close()
         return
+    
     status, last_clock_in, last_break_start, work_hours, break_hours = row
     work_hours = work_hours or 0
     break_hours = break_hours or 0
+    
     if action == 'clocked-in':
-        # Start work timer
-        c.execute('UPDATE users SET status = ?, last_clock_in = ? WHERE username = ?', (action, now, username))
+        if status == 'break':
+            # Coming back from break - add break time and continue work
+            if last_break_start:
+                try:
+                    start = datetime.fromisoformat(last_break_start)
+                    elapsed = (datetime.now() - start).total_seconds() / 3600.0
+                    break_hours += elapsed
+                except ValueError:
+                    # Handle invalid datetime format
+                    pass
+            c.execute('UPDATE users SET status = ?, last_clock_in = ?, break_hours = ?, last_break_start = NULL WHERE username = ?', 
+                     ('clocked-in', now, break_hours, username))
+        else:
+            # Fresh clock in - just start work timer
+            c.execute('UPDATE users SET status = ?, last_clock_in = ? WHERE username = ?', 
+                     (action, now, username))
+    
     elif action == 'break':
-        # Pause work, start break
-        if last_clock_in:
-            # Add to work_hours
-            start = datetime.fromisoformat(last_clock_in)
-            elapsed = (datetime.now() - start).total_seconds() / 3600.0
-            work_hours += elapsed
-        c.execute('UPDATE users SET status = ?, last_break_start = ?, work_hours = ?, last_clock_in = NULL WHERE username = ?', (action, now, work_hours, username))
-    elif action == 'clocked-in-from-break':
-        # Resume work, pause break
-        if last_break_start:
-            start = datetime.fromisoformat(last_break_start)
-            elapsed = (datetime.now() - start).total_seconds() / 3600.0
-            break_hours += elapsed
-        c.execute('UPDATE users SET status = ?, last_clock_in = ?, break_hours = ?, last_break_start = NULL WHERE username = ?', ('clocked-in', now, break_hours, username))
+        if status == 'clocked-in' and last_clock_in:
+            # Going on break - add work time and start break
+            try:
+                start = datetime.fromisoformat(last_clock_in)
+                elapsed = (datetime.now() - start).total_seconds() / 3600.0
+                work_hours += elapsed
+            except ValueError:
+                # Handle invalid datetime format
+                pass
+            c.execute('UPDATE users SET status = ?, last_break_start = ?, work_hours = ?, last_clock_in = NULL WHERE username = ?', 
+                     (action, now, work_hours, username))
+        else:
+            # Just update status if not coming from work
+            c.execute('UPDATE users SET status = ? WHERE username = ?', (action, username))
+    
     elif action == 'clocked-out':
-        # End work, save to timesheet
-        if last_clock_in:
-            start = datetime.fromisoformat(last_clock_in)
-            elapsed = (datetime.now() - start).total_seconds() / 3600.0
-            work_hours += elapsed
+        # End work - add current session time and save to timesheet
+        if status == 'clocked-in' and last_clock_in:
+            # Add final work session
+            try:
+                start = datetime.fromisoformat(last_clock_in)
+                elapsed = (datetime.now() - start).total_seconds() / 3600.0
+                work_hours += elapsed
+            except ValueError:
+                # Handle invalid datetime format
+                pass
+        elif status == 'break' and last_break_start:
+            # Add final break session
+            try:
+                start = datetime.fromisoformat(last_break_start)
+                elapsed = (datetime.now() - start).total_seconds() / 3600.0
+                break_hours += elapsed
+            except ValueError:
+                # Handle invalid datetime format
+                pass
+        
         # Save to timesheet
         today = date.today().isoformat()
-        c.execute('''INSERT INTO timesheets (username, date, work_hours, break_hours) VALUES (?, ?, ?, ?)''', (username, today, work_hours, break_hours))
+        c.execute('''INSERT INTO timesheets (username, date, work_hours, break_hours) VALUES (?, ?, ?, ?)''', 
+                 (username, today, work_hours, break_hours))
+        
         # Reset for next day
-        c.execute('UPDATE users SET status = ?, work_hours = 0, break_hours = 0, last_clock_in = NULL, last_break_start = NULL WHERE username = ?', (action, username))
+        c.execute('UPDATE users SET status = ?, work_hours = 0, break_hours = 0, last_clock_in = NULL, last_break_start = NULL WHERE username = ?', 
+                 (action, username))
+    
     else:
-        # Just update status
+        # Just update status for other actions
         c.execute('UPDATE users SET status = ? WHERE username = ?', (action, username))
+    
     conn.commit()
     conn.close()
 
 @app.route("/signup", methods=["POST"])
 def signup():
     data = request.json
-    if not isinstance(data, dict) or not all(k in data for k in ("username", "password", "email", "room_code", "deskSelection", "role")):
+    if not isinstance(data, dict) or not all(k in data for k in ("username", "password", "email", "room_code", "role")):
         return jsonify({"error": "Missing fields"}), 400
     if find_user_by_username(data["username"]):
         return jsonify({"error": "User exists"}), 409
 
-    if data["room_code"] == "54321" and not data["deskSelection"]:
+    if data["room_code"] == "54321" and not data.get("deskSelection"):
         return jsonify({"error": "Desk selection required for this code"}), 400
     
     role = "admin" if data.get("role") == "admin" else "user"
-    if role =="admin":
+    if role == "admin":
         if data.get("admin_code") != "1122334455":
             return jsonify({"error": "Invalid admin code"}), 403
+    
     add_user({
         "username": data["username"],
         "password": data["password"],
         "email": data["email"],
         "room_code": data["room_code"],
-        "desk": data["deskSelection"] if data["deskSelection"] else None,
+        "desk": data.get("deskSelection") if data.get("deskSelection") else None,
+        "avatar": data.get("avatar"),  # <-- Add this line!
         "status": "none",
         "role": role,
         "work_hours": 0,
-        "break_hours": 0  # Add this
+        "break_hours": 0,
+        "inbox": []
     })
     
     return jsonify({"message": "User registered"}), 201
@@ -166,7 +224,7 @@ def login():
     if user and user["password"] == data["password"]:
         user.pop('password', None)  # Don't send password to frontend
         return jsonify({"message": "Login successful", "user": user}), 200
-    return jsonify({"error": "Invalid credentials or group code"}), 401
+    return jsonify({"error": "Unable to login"}), 401
 
 @app.route("/status/<username>/<action>", methods=["POST"])
 def update_status(username, action):
@@ -218,6 +276,7 @@ def get_status():
             {
                 "username": u["username"],
                 "desk": u.get("desk"),
+                "avatar": u.get("avatar"),
                 "status": u.get("status", "none"),
             }
             for u in users
@@ -268,11 +327,81 @@ def delete_user():
 
 @app.route('/user/<username>', methods=['GET'])
 def get_user(username):
-    user = find_user_by_username(username)
-    if user:
-        user.pop('password', None)
-        return jsonify(user), 200
-    return jsonify({'error': 'User not found'}), 404
+    try:
+        user = find_user_by_username(username)
+        if user:
+            user.pop('password', None)
+            return jsonify(user), 200
+        else:
+            return jsonify({'error': 'User not found'}), 404
+    except Exception as e:
+        return jsonify({'error': f'Server error: {str(e)}'}), 500
+
+@app.route('/inbox', methods=['POST'])
+def send_message():
+    data = request.json
+    required = ['sender', 'receiver', 'message']
+    if not all(k in data for k in required):
+        return jsonify({'error': 'Missing fields'}), 400
+    subject = data.get('subject', '')
+    timestamp = datetime.now().isoformat()
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('INSERT INTO messages (sender, receiver, subject, message, timestamp) VALUES (?, ?, ?, ?, ?)',
+              (data['sender'], data['receiver'], subject, data['message'], timestamp))
+    conn.commit()
+    conn.close()
+    return jsonify({'message': 'Message sent!'}), 201
+
+@app.route('/inbox', methods=['GET'])
+def get_inbox():
+    username = request.args.get('username')
+    if not username:
+        return jsonify({'error': 'Username required'}), 400
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('SELECT id, sender, subject, message, timestamp FROM messages WHERE receiver = ? AND (deleted IS NULL OR deleted = 0) ORDER BY timestamp DESC', (username,))
+    messages = [
+        {'id': row[0], 'sender': row[1], 'subject': row[2], 'message': row[3], 'timestamp': row[4]}
+        for row in c.fetchall()
+    ]
+    conn.close()
+    return jsonify({'message': messages})
+
+@app.route('/message/<int:message_id>', methods=['GET'])
+def view_message(message_id):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('SELECT id, sender, receiver, subject, message, timestamp, is_read FROM messages WHERE id = ?', (message_id,))
+    row = c.fetchone()
+    if row:
+        # Optionally mark as read
+        c.execute('UPDATE messages SET is_read = 1 WHERE id = ?', (message_id,))
+        conn.commit()
+        message = dict(zip(['id', 'sender', 'receiver', 'subject', 'message', 'timestamp', 'is_read'], row))
+        conn.close()
+        return jsonify({'message': message}), 200
+    else:
+        conn.close()
+        return jsonify({'error': 'Message not found'}), 404
+
+@app.route('/message/<int:message_id>', methods=['DELETE'])
+def delete_message(message_id):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('UPDATE messages SET deleted = 1 WHERE id = ?', (message_id,))
+    conn.commit()
+    conn.close()
+    return jsonify({'message': 'Message deleted'}), 200
+
+@app.route('/message/<int:message_id>/undo', methods=['POST'])
+def undo_delete_message(message_id):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('UPDATE messages SET deleted = 0 WHERE id = ?', (message_id,))
+    conn.commit()
+    conn.close()
+    return jsonify({'message': 'Message restored'}), 200
 
 @app.route('/timesheets/week', methods=['GET'])
 def get_week_timesheets():
@@ -308,6 +437,7 @@ def get_week_timesheets():
 
 def get_week_dates():
     today = date.today()
+    # Monday is 0, Sunday is 6
     start = today - timedelta(days=today.weekday())  # Monday
     return [(start + timedelta(days=i)).isoformat() for i in range(5)]  # Mon-Fri
 
@@ -358,13 +488,21 @@ def get_current_hours():
         
         # Add current session time if user is actively working
         if status == 'clocked-in' and last_clock_in:
-            start = datetime.fromisoformat(last_clock_in)
-            elapsed = (current_time - start).total_seconds() / 3600.0
-            work_hours += elapsed
+            try:
+                start = datetime.fromisoformat(last_clock_in)
+                elapsed = (current_time - start).total_seconds() / 3600.0
+                work_hours += elapsed
+            except ValueError:
+                # Handle invalid datetime format
+                pass
         elif status == 'break' and last_break_start:
-            start = datetime.fromisoformat(last_break_start)
-            elapsed = (current_time - start).total_seconds() / 3600.0
-            break_hours += elapsed
+            try:
+                start = datetime.fromisoformat(last_break_start)
+                elapsed = (current_time - start).total_seconds() / 3600.0
+                break_hours += elapsed
+            except ValueError:
+                # Handle invalid datetime format
+                pass
             
         result.append({
             'username': username,
