@@ -6,7 +6,14 @@ import os
 from datetime import datetime, date, timedelta
 
 app = Flask(__name__, static_folder='.')
-CORS(app, resources={r"/*": {"origins": "http://localhost:8000"}})  # ← Make sure this is after app creation
+CORS(app, resources={
+    r"/*": 
+    {"origins": [
+        "http://localhost:8000", 
+        "https://joshthinh.github.io/Elen-Signin/"
+        ]
+    }
+})  # ← Make sure this is after app creation
 
 DB_FILE = 'users.db'
 
