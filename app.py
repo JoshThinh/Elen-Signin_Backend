@@ -10,7 +10,7 @@ CORS(app, resources={
     r"/*": 
     {"origins": [
         "http://localhost:8000", 
-        "https://joshthinh.github.io"
+        "https://joshthinh.github.io/Elen-Signin/"
         ]
     }
 })  # ← Make sure this is after app creation
