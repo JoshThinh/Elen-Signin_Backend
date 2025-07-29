@@ -10,7 +10,7 @@ CORS(app, resources={
     r"/*": 
     {"origins": [
         "http://localhost:8000", 
-        "https://joshthinh.github"
+        "https://joshthinh.github.io"
         ]
     }
 })  # ← Make sure this is after app creation
