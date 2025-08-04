@@ -195,12 +195,12 @@ def signup():
     if find_user_by_username(data["username"]):
         return jsonify({"error": "User exists"}), 409
 
-    if data["room_code"] == "54321" and not data.get("deskSelection"):
+    if data["room_code"] == "ElenConsulting100" and not data.get("deskSelection"):
         return jsonify({"error": "Desk selection required for this code"}), 400
     
     role = "admin" if data.get("role") == "admin" else "user"
     if role == "admin":
-        if data.get("admin_code") != "1122334455":
+        if data.get("admin_code") != "ElenConsultingAdmin532":
             return jsonify({"error": "Invalid admin code"}), 403
     
     add_user({
