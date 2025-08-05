@@ -3,7 +3,8 @@ from flask_cors import CORS
 import json
 import sqlite3
 import os
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone
+import pytz
 
 app = Flask(__name__, static_folder='.')
 CORS(app, resources={
@@ -17,6 +18,33 @@ CORS(app, resources={
 })  # ← Make sure this is after app creation
 
 DB_FILE = 'users.db'
+
+# Set your desired timezone (e.g., 'America/New_York', 'America/Los_Angeles', 'UTC')
+TIMEZONE = 'UTC'  # Change this to your desired timezone
+
+def get_current_time():
+    """Get current time in the specified timezone"""
+    tz = pytz.timezone(TIMEZONE)
+    return datetime.now(tz)
+
+def get_current_time_iso():
+    """Get current time as ISO string in the specified timezone"""
+    return get_current_time().isoformat()
+
+def parse_datetime_iso(datetime_str):
+    """Parse ISO datetime string and convert to timezone-aware datetime"""
+    if not datetime_str:
+        return None
+    try:
+        # Parse the ISO string
+        dt = datetime.fromisoformat(datetime_str)
+        # If it's naive (no timezone), assume it's in the target timezone
+        if dt.tzinfo is None:
+            tz = pytz.timezone(TIMEZONE)
+            dt = tz.localize(dt)
+        return dt
+    except ValueError:
+        return None
 
 def init_db():
     conn = sqlite3.connect(DB_FILE)
@@ -108,7 +136,7 @@ def add_user(user):
 def update_user_status(username, action):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    now = datetime.now().isoformat()
+    now = get_current_time_iso()
     
     # Fetch current user info
     c.execute('SELECT status, last_clock_in, last_break_start, work_hours, break_hours FROM users WHERE username = ?', (username,))
@@ -126,8 +154,8 @@ def update_user_status(username, action):
             # Coming back from break - add break time and continue work
             if last_break_start:
                 try:
-                    start = datetime.fromisoformat(last_break_start)
-                    elapsed = (datetime.now() - start).total_seconds() / 3600.0
+                    start = parse_datetime_iso(last_break_start)
+                    elapsed = (get_current_time() - start).total_seconds() / 3600.0
                     break_hours += elapsed
                 except ValueError:
                     # Handle invalid datetime format
@@ -143,8 +171,8 @@ def update_user_status(username, action):
         if status == 'clocked-in' and last_clock_in:
             # Going on break - add work time and start break
             try:
-                start = datetime.fromisoformat(last_clock_in)
-                elapsed = (datetime.now() - start).total_seconds() / 3600.0
+                start = parse_datetime_iso(last_clock_in)
+                elapsed = (get_current_time() - start).total_seconds() / 3600.0
                 work_hours += elapsed
             except ValueError:
                 # Handle invalid datetime format
@@ -164,8 +192,8 @@ def update_user_status(username, action):
             # Coming from break - add break time and start work-from-home/job-site
             if last_break_start:
                 try:
-                    start = datetime.fromisoformat(last_break_start)
-                    elapsed = (datetime.now() - start).total_seconds() / 3600.0
+                    start = parse_datetime_iso(last_break_start)
+                    elapsed = (get_current_time() - start).total_seconds() / 3600.0
                     break_hours += elapsed
                 except ValueError:
                     # Handle invalid datetime format
@@ -182,8 +210,8 @@ def update_user_status(username, action):
         if status in ['clocked-in', 'work-from-home', 'job-site'] and last_clock_in:
             # Add final work session (from any active work status)
             try:
-                start = datetime.fromisoformat(last_clock_in)
-                elapsed = (datetime.now() - start).total_seconds() / 3600.0
+                start = parse_datetime_iso(last_clock_in)
+                elapsed = (get_current_time() - start).total_seconds() / 3600.0
                 work_hours += elapsed
             except ValueError:
                 # Handle invalid datetime format
@@ -191,8 +219,8 @@ def update_user_status(username, action):
         elif status == 'break' and last_break_start:
             # Add final break session
             try:
-                start = datetime.fromisoformat(last_break_start)
-                elapsed = (datetime.now() - start).total_seconds() / 3600.0
+                start = parse_datetime_iso(last_break_start)
+                elapsed = (get_current_time() - start).total_seconds() / 3600.0
                 break_hours += elapsed
             except ValueError:
                 # Handle invalid datetime format
@@ -379,7 +407,7 @@ def send_message():
     if not all(k in data for k in required):
         return jsonify({'error': 'Missing fields'}), 400
     subject = data.get('subject', '')
-    timestamp = datetime.now().isoformat()
+    timestamp = get_current_time_iso()
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute('INSERT INTO messages (sender, receiver, subject, message, timestamp) VALUES (?, ?, ?, ?, ?)',
@@ -513,7 +541,7 @@ def get_current_hours():
     rows = c.fetchall()
     conn.close()
     
-    current_time = datetime.now()
+    current_time = get_current_time()
     result = []
     
     for row in rows:
@@ -524,7 +552,7 @@ def get_current_hours():
         # Add current session time if user is actively working (including work-from-home and job-site)
         if status in ['clocked-in', 'work-from-home', 'job-site'] and last_clock_in:
             try:
-                start = datetime.fromisoformat(last_clock_in)
+                start = parse_datetime_iso(last_clock_in)
                 elapsed = (current_time - start).total_seconds() / 3600.0
                 work_hours += elapsed
             except ValueError:
@@ -532,7 +560,7 @@ def get_current_hours():
                 pass
         elif status == 'break' and last_break_start:
             try:
-                start = datetime.fromisoformat(last_break_start)
+                start = parse_datetime_iso(last_break_start)
                 elapsed = (current_time - start).total_seconds() / 3600.0
                 break_hours += elapsed
             except ValueError:
@@ -549,6 +577,18 @@ def get_current_hours():
         })
     
     return jsonify(result), 200
+
+@app.route("/debug/time", methods=["GET"])
+def debug_time():
+    """Debug endpoint to check timezone and current time"""
+    import time
+    return jsonify({
+        'server_timezone': TIMEZONE,
+        'current_time_utc': datetime.now(timezone.utc).isoformat(),
+        'current_time_local': get_current_time_iso(),
+        'server_timestamp': time.time(),
+        'timezone_info': str(pytz.timezone(TIMEZONE))
+    }), 200
 
 if __name__ == '__main__':
     app.run(debug=True)
