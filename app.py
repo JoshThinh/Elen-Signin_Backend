@@ -35,7 +35,8 @@ def init_db():
             work_hours REAL DEFAULT 0,
             break_hours REAL DEFAULT 0,
             last_clock_in TEXT,
-            last_break_start TEXT
+            last_break_start TEXT,
+            last_clock_out TEXT
         )
     ''')
     c.execute('''
@@ -68,11 +69,15 @@ def init_db():
         c.execute('ALTER TABLE messages ADD COLUMN deleted INTEGER DEFAULT 0')
     except sqlite3.OperationalError:
         pass  # Already exists
+    # Add last_clock_out column if it doesn't exist
+    try:
+        c.execute('ALTER TABLE users ADD COLUMN last_clock_out TEXT')
+    except sqlite3.OperationalError:
+        pass  # Already exists
     conn.commit()
     conn.close()
 
 init_db()
-
 
 def get_all_users():
     conn = sqlite3.connect(DB_FILE)
@@ -85,18 +90,18 @@ def get_all_users():
 def find_user_by_username(username):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute('SELECT username, password, email, room_code, desk, status, role, work_hours, break_hours FROM users WHERE username = ?', (username,))
+    c.execute('SELECT username, password, email, room_code, desk, status, role, work_hours, break_hours, last_clock_in, last_break_start, last_clock_out FROM users WHERE username = ?', (username,))
     row = c.fetchone()
     conn.close()
     if row:
-        return dict(zip(['username', 'password', 'email', 'room_code', 'desk', 'status', 'role', 'work_hours', 'break_hours'], row))
+        return dict(zip(['username', 'password', 'email', 'room_code', 'desk', 'status', 'role', 'work_hours', 'break_hours', 'clock_in_time', 'break_start_time', 'clock_out_time'], row))
     return None
 
 def add_user(user):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute('''INSERT INTO users (username, password, email, room_code, desk, avatar, status, role, work_hours, break_hours) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-              (user['username'], user['password'], user['email'], user['room_code'], user.get('desk'), user.get('avatar'), user.get('status', 'none'), user.get('role', 'user'), user.get('work_hours', 0), user.get('break_hours', 0)))
+              (user['username'], user['password'], user['email'], user['room_code'], user.get('desk'), user.get('avatar'), user.get('status', 'clocked-out'), user.get('role', 'user'), user.get('work_hours', 0), user.get('break_hours', 0)))
     conn.commit()
     conn.close()
 
@@ -150,10 +155,32 @@ def update_user_status(username, action):
             # Just update status if not coming from work
             c.execute('UPDATE users SET status = ? WHERE username = ?', (action, username))
     
+    elif action in ['work-from-home', 'job-site']:
+        # For work-from-home and job-site, preserve clock-in time and continue tracking
+        if status == 'clocked-in' and last_clock_in:
+            # User is already clocked in, just change status but keep clock-in time
+            c.execute('UPDATE users SET status = ? WHERE username = ?', (action, username))
+        elif status == 'break':
+            # Coming from break - add break time and start work-from-home/job-site
+            if last_break_start:
+                try:
+                    start = datetime.fromisoformat(last_break_start)
+                    elapsed = (datetime.now() - start).total_seconds() / 3600.0
+                    break_hours += elapsed
+                except ValueError:
+                    # Handle invalid datetime format
+                    pass
+            c.execute('UPDATE users SET status = ?, last_clock_in = ?, break_hours = ?, last_break_start = NULL WHERE username = ?', 
+                     (action, now, break_hours, username))
+        else:
+            # Fresh start - begin work-from-home/job-site with new clock-in time
+            c.execute('UPDATE users SET status = ?, last_clock_in = ? WHERE username = ?', 
+                     (action, now, username))
+    
     elif action == 'clocked-out':
         # End work - add current session time and save to timesheet
-        if status == 'clocked-in' and last_clock_in:
-            # Add final work session
+        if status in ['clocked-in', 'work-from-home', 'job-site'] and last_clock_in:
+            # Add final work session (from any active work status)
             try:
                 start = datetime.fromisoformat(last_clock_in)
                 elapsed = (datetime.now() - start).total_seconds() / 3600.0
@@ -176,9 +203,9 @@ def update_user_status(username, action):
         c.execute('''INSERT INTO timesheets (username, date, work_hours, break_hours) VALUES (?, ?, ?, ?)''', 
                  (username, today, work_hours, break_hours))
         
-        # Reset for next day
-        c.execute('UPDATE users SET status = ?, work_hours = 0, break_hours = 0, last_clock_in = NULL, last_break_start = NULL WHERE username = ?', 
-                 (action, username))
+        # Reset for next day and store clock-out time
+        c.execute('UPDATE users SET status = ?, work_hours = 0, break_hours = 0, last_clock_in = NULL, last_break_start = NULL, last_clock_out = ? WHERE username = ?', 
+                 (action, now, username))
     
     else:
         # Just update status for other actions
@@ -209,8 +236,8 @@ def signup():
         "email": data["email"],
         "room_code": data["room_code"],
         "desk": data.get("deskSelection") if data.get("deskSelection") else None,
-        "avatar": data.get("avatar"),  # <-- Add this line!
-        "status": "none",
+        "avatar": data.get("avatar"),
+        "status": data.get("status", "clocked-out"),  # Set initial status to clocked-out
         "role": role,
         "work_hours": 0,
         "break_hours": 0,
@@ -482,7 +509,7 @@ def weekly_timesheets():
 def get_current_hours():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute('SELECT username, work_hours, break_hours, status, last_clock_in, last_break_start FROM users')
+    c.execute('SELECT username, work_hours, break_hours, status, last_clock_in, last_break_start, last_clock_out FROM users')
     rows = c.fetchall()
     conn.close()
     
@@ -490,12 +517,12 @@ def get_current_hours():
     result = []
     
     for row in rows:
-        username, work_hours, break_hours, status, last_clock_in, last_break_start = row
+        username, work_hours, break_hours, status, last_clock_in, last_break_start, last_clock_out = row
         work_hours = work_hours or 0
         break_hours = break_hours or 0
         
-        # Add current session time if user is actively working
-        if status == 'clocked-in' and last_clock_in:
+        # Add current session time if user is actively working (including work-from-home and job-site)
+        if status in ['clocked-in', 'work-from-home', 'job-site'] and last_clock_in:
             try:
                 start = datetime.fromisoformat(last_clock_in)
                 elapsed = (current_time - start).total_seconds() / 3600.0
@@ -516,7 +543,9 @@ def get_current_hours():
             'username': username,
             'work_hours': round(work_hours, 2),
             'break_hours': round(break_hours, 2),
-            'status': status
+            'status': status,
+            'clock_in_time': last_clock_in,
+            'clock_out_time': last_clock_out
         })
     
     return jsonify(result), 200
