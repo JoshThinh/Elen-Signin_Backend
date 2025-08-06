@@ -58,7 +58,9 @@ def init_db():
             break_hours REAL DEFAULT 0,
             last_clock_in TEXT,
             last_break_start TEXT,
-            last_clock_out TEXT
+            last_break_end TEXT,
+            last_clock_out TEXT,
+            job_site_location TEXT
         )
     ''')
     c.execute('''
@@ -96,6 +98,16 @@ def init_db():
         c.execute('ALTER TABLE users ADD COLUMN last_clock_out TEXT')
     except sqlite3.OperationalError:
         pass  # Already exists
+    # Add last_break_end column if it doesn't exist
+    try:
+        c.execute('ALTER TABLE users ADD COLUMN last_break_end TEXT')
+    except sqlite3.OperationalError:
+        pass  # Already exists
+    # Add job_site_location column if it doesn't exist
+    try:
+        c.execute('ALTER TABLE users ADD COLUMN job_site_location TEXT')
+    except sqlite3.OperationalError:
+        pass  # Column already exists
     conn.commit()
     conn.close()
 
@@ -112,11 +124,11 @@ def get_all_users():
 def find_user_by_username(username):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute('SELECT username, password, email, room_code, desk, status, role, work_hours, break_hours, last_clock_in, last_break_start, last_clock_out FROM users WHERE username = ?', (username,))
+    c.execute('SELECT username, password, email, room_code, desk, status, role, work_hours, break_hours, last_clock_in, last_break_start, last_break_end, last_clock_out, job_site_location FROM users WHERE username = ?', (username,))
     row = c.fetchone()
     conn.close()
     if row:
-        return dict(zip(['username', 'password', 'email', 'room_code', 'desk', 'status', 'role', 'work_hours', 'break_hours', 'clock_in_time', 'break_start_time', 'clock_out_time'], row))
+        return dict(zip(['username', 'password', 'email', 'room_code', 'desk', 'status', 'role', 'work_hours', 'break_hours', 'clock_in_time', 'break_start_time', 'break_end_time', 'clock_out_time', 'job_site_location'], row))
     return None
 
 def add_user(user):
@@ -127,7 +139,7 @@ def add_user(user):
     conn.commit()
     conn.close()
 
-def update_user_status(username, action):
+def update_user_status(username, action, job_site_location=None):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     now = get_current_time_iso()
@@ -154,10 +166,10 @@ def update_user_status(username, action):
                 except ValueError:
                     # Handle invalid datetime format
                     pass
-            c.execute('UPDATE users SET status = ?, last_clock_in = ?, break_hours = ?, last_break_start = NULL WHERE username = ?', 
-                     ('clocked-in', now, break_hours, username))
+            c.execute('UPDATE users SET status = ?, break_hours = ?, last_break_end = ? WHERE username = ?', 
+                     ('clocked-in', break_hours, now, username))
         else:
-            # Fresh clock in - just start work timer
+            # Fresh clock in (only after clock out) - start work timer
             c.execute('UPDATE users SET status = ?, last_clock_in = ? WHERE username = ?', 
                      (action, now, username))
     
@@ -171,19 +183,19 @@ def update_user_status(username, action):
             except ValueError:
                 # Handle invalid datetime format
                 pass
-            c.execute('UPDATE users SET status = ?, last_break_start = ?, work_hours = ?, last_clock_in = NULL WHERE username = ?', 
+            c.execute('UPDATE users SET status = ?, last_break_start = ?, work_hours = ? WHERE username = ?', 
                      (action, now, work_hours, username))
         else:
             # Just update status if not coming from work
             c.execute('UPDATE users SET status = ? WHERE username = ?', (action, username))
     
-    elif action in ['work-from-home', 'job-site']:
-        # For work-from-home and job-site, preserve clock-in time and continue tracking
+    elif action == 'job-site':
+        # For job-site, preserve clock-in time and continue tracking, and store location
         if status == 'clocked-in' and last_clock_in:
             # User is already clocked in, just change status but keep clock-in time
-            c.execute('UPDATE users SET status = ? WHERE username = ?', (action, username))
+            c.execute('UPDATE users SET status = ?, job_site_location = ? WHERE username = ?', (action, job_site_location, username))
         elif status == 'break':
-            # Coming from break - add break time and start work-from-home/job-site
+            # Coming from break - add break time and start job-site
             if last_break_start:
                 try:
                     start = parse_datetime_iso(last_break_start)
@@ -192,10 +204,32 @@ def update_user_status(username, action):
                 except ValueError:
                     # Handle invalid datetime format
                     pass
-            c.execute('UPDATE users SET status = ?, last_clock_in = ?, break_hours = ?, last_break_start = NULL WHERE username = ?', 
-                     (action, now, break_hours, username))
+            c.execute('UPDATE users SET status = ?, break_hours = ?, last_break_end = ?, job_site_location = ? WHERE username = ?', 
+                     (action, break_hours, now, job_site_location, username))
         else:
-            # Fresh start - begin work-from-home/job-site with new clock-in time
+            # Fresh start (only after clock out) - begin job-site with new clock-in time
+            c.execute('UPDATE users SET status = ?, last_clock_in = ?, job_site_location = ? WHERE username = ?', 
+                     (action, now, job_site_location, username))
+    
+    elif action == 'work-from-home':
+        # For work-from-home, preserve clock-in time and continue tracking
+        if status == 'clocked-in' and last_clock_in:
+            # User is already clocked in, just change status but keep clock-in time
+            c.execute('UPDATE users SET status = ? WHERE username = ?', (action, username))
+        elif status == 'break':
+            # Coming from break - add break time and start work-from-home
+            if last_break_start:
+                try:
+                    start = parse_datetime_iso(last_break_start)
+                    elapsed = (get_current_time() - start).total_seconds() / 3600.0
+                    break_hours += elapsed
+                except ValueError:
+                    # Handle invalid datetime format
+                    pass
+            c.execute('UPDATE users SET status = ?, break_hours = ?, last_break_end = ? WHERE username = ?', 
+                     (action, break_hours, now, username))
+        else:
+            # Fresh start (only after clock out) - begin work-from-home with new clock-in time
             c.execute('UPDATE users SET status = ?, last_clock_in = ? WHERE username = ?', 
                      (action, now, username))
     
@@ -226,7 +260,7 @@ def update_user_status(username, action):
                  (username, today, work_hours, break_hours))
         
         # Reset for next day and store clock-out time
-        c.execute('UPDATE users SET status = ?, work_hours = 0, break_hours = 0, last_break_start = NULL, last_clock_out = ? WHERE username = ?', 
+        c.execute('UPDATE users SET status = ?, work_hours = 0, break_hours = 0, last_break_start = NULL, last_break_end = NULL, last_clock_out = ? WHERE username = ?', 
                  (action, now, username))
     
     else:
@@ -287,7 +321,13 @@ def login():
 def update_status(username, action):
     user = find_user_by_username(username)
     if user:
-        update_user_status(username, action)
+        # Check if request has JSON body with location
+        job_site_location = None
+        if request.is_json:
+            data = request.get_json()
+            job_site_location = data.get('location')
+        
+        update_user_status(username, action, job_site_location)
         return jsonify({"message": f"Status updated to {action}"}), 200
     return jsonify({"error": "User not found"}), 404
 
@@ -531,7 +571,7 @@ def weekly_timesheets():
 def get_current_hours():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute('SELECT username, work_hours, break_hours, status, last_clock_in, last_break_start, last_clock_out FROM users')
+    c.execute('SELECT username, work_hours, break_hours, status, last_clock_in, last_break_start, last_break_end, last_clock_out FROM users')
     rows = c.fetchall()
     conn.close()
     
@@ -539,7 +579,7 @@ def get_current_hours():
     result = []
     
     for row in rows:
-        username, work_hours, break_hours, status, last_clock_in, last_break_start, last_clock_out = row
+        username, work_hours, break_hours, status, last_clock_in, last_break_start, last_break_end, last_clock_out = row
         work_hours = work_hours or 0
         break_hours = break_hours or 0
         
@@ -567,7 +607,15 @@ def get_current_hours():
             'break_hours': round(break_hours, 2),
             'status': status,
             'clock_in_time': last_clock_in,
-            'clock_out_time': last_clock_out
+            'break_start_time': last_break_start,
+            'break_end_time': last_break_end,
+            'clock_out_time': last_clock_out,
+            'debug_info': {
+                'last_clock_in': last_clock_in,
+                'last_break_start': last_break_start,
+                'last_break_end': last_break_end,
+                'last_clock_out': last_clock_out
+            }
         })
     
     return jsonify(result), 200
@@ -583,6 +631,29 @@ def debug_time():
         'server_timestamp': time.time(),
         'timezone_info': 'UTC'
     }), 200
+
+@app.route("/debug/user/<username>", methods=["GET"])
+def debug_user(username):
+    """Debug endpoint to check user's time data"""
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('SELECT username, status, work_hours, break_hours, last_clock_in, last_break_start, last_break_end, last_clock_out FROM users WHERE username = ?', (username,))
+    row = c.fetchone()
+    conn.close()
+    
+    if row:
+        return jsonify({
+            'username': row[0],
+            'status': row[1],
+            'work_hours': row[2],
+            'break_hours': row[3],
+            'last_clock_in': row[4],
+            'last_break_start': row[5],
+            'last_break_end': row[6],
+            'last_clock_out': row[7]
+        }), 200
+    else:
+        return jsonify({'error': 'User not found'}), 404
 
 if __name__ == '__main__':
     app.run(debug=True)
