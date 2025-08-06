@@ -4,7 +4,6 @@ import json
 import sqlite3
 import os
 from datetime import datetime, date, timedelta, timezone
-import pytz
 
 app = Flask(__name__, static_folder='.')
 CORS(app, resources={
@@ -19,16 +18,12 @@ CORS(app, resources={
 
 DB_FILE = 'users.db'
 
-# Set your desired timezone (e.g., 'America/New_York', 'America/Los_Angeles', 'UTC')
-TIMEZONE = 'UTC'  # Change this to your desired timezone
-
 def get_current_time():
-    """Get current time in the specified timezone"""
-    tz = pytz.timezone(TIMEZONE)
-    return datetime.now(tz)
+    """Get current time in UTC"""
+    return datetime.now(timezone.utc)
 
 def get_current_time_iso():
-    """Get current time as ISO string in the specified timezone"""
+    """Get current time as ISO string in UTC"""
     return get_current_time().isoformat()
 
 def parse_datetime_iso(datetime_str):
@@ -38,10 +33,9 @@ def parse_datetime_iso(datetime_str):
     try:
         # Parse the ISO string
         dt = datetime.fromisoformat(datetime_str)
-        # If it's naive (no timezone), assume it's in the target timezone
+        # If it's naive (no timezone), assume it's UTC
         if dt.tzinfo is None:
-            tz = pytz.timezone(TIMEZONE)
-            dt = tz.localize(dt)
+            dt = dt.replace(tzinfo=timezone.utc)
         return dt
     except ValueError:
         return None
@@ -232,7 +226,7 @@ def update_user_status(username, action):
                  (username, today, work_hours, break_hours))
         
         # Reset for next day and store clock-out time
-        c.execute('UPDATE users SET status = ?, work_hours = 0, break_hours = 0, last_clock_in = NULL, last_break_start = NULL, last_clock_out = ? WHERE username = ?', 
+        c.execute('UPDATE users SET status = ?, work_hours = 0, break_hours = 0, last_break_start = NULL, last_clock_out = ? WHERE username = ?', 
                  (action, now, username))
     
     else:
@@ -583,11 +577,11 @@ def debug_time():
     """Debug endpoint to check timezone and current time"""
     import time
     return jsonify({
-        'server_timezone': TIMEZONE,
+        'server_timezone': 'UTC',
         'current_time_utc': datetime.now(timezone.utc).isoformat(),
         'current_time_local': get_current_time_iso(),
         'server_timestamp': time.time(),
-        'timezone_info': str(pytz.timezone(TIMEZONE))
+        'timezone_info': 'UTC'
     }), 200
 
 if __name__ == '__main__':
